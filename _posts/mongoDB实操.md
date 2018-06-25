@@ -1,0 +1,415 @@
+#MongoDb实操
+###查看当前进程
+* db.currentOp({secs_running:{$gt:3}})
+
+  `查看当前执行时间大于3秒的操作`
+
+* db.killOp(opid)
+
+  `杀死进程，opid->进程号`
+
+### Aggregation
+
+**In mongo shell**
+
+```Js
+db.getCollection('trackAlarmMongo').aggregate([{
+    $match: {
+        gpstime: {
+					$gte: new Date('2017/01/09 00:00:00'),
+					$lte: ISODate('2017-11-25T06:00:36.000Z')},
+        $and: [
+            {$or: [
+					{gpsdeviceid: '402848945a82c752015a83c483380000'},
+					{gpsdeviceid: '00000000551544e30155202a8eb1024b'}
+					]
+			 },
+            {alarmType: {$in: [1, 18, 19, 20]}}
+        ]
+    }
+}, {
+    $group: {
+        _id: {
+            gpsdeviceid: "$gpsdeviceid",
+            gpsName: "$gpsName",
+            longitude: "$longitude",
+            //取六位有效数字
+            latitude: "{$divide:[{$trunc:{$multiply:['$latitude', 1e6]}}, 1e6]}",
+            alarmType: "$alarmType"
+        },
+        carNumber: {$addToSet: "$carNumber"},
+        departmentName: {$addToSet: "$departmentName"},
+        maxGpstime: {$max: "$gpstime"},
+        minGpstime: {$min: "$gpstime"},
+        speed: {$max: "$speed"},
+        personName: {$addToSet: "$personName"}
+    }
+}, {
+    $sort: {"maxGpstime": -1}
+}, {
+    $group: {_id: null, count: {$sum: 1}}//get group count
+}, {
+    $project: {_id: 0, count: 1}//filter _id,leave count only
+}])._batch;
+```
+
+**In Java**
+
+```Js
+Aggregation agg = new Aggregation(
+    match(Criteria.where("gpsdeviceid").in((gpsdeviceids)),
+    group("gpsName"),
+    group().count().as("count")//get group count
+);
+```
+
+### Function
+
+```Js
+db.system.js.update(
+    {
+        _id: "alarmAnalysis"
+    },
+    {
+        value: function (beginDateStr, endDateStr, gpsdeviceid, alarmType, gpsName
+            , carNumber, departmentId, departmentName, personId, personName, effective) {
+            var condition = {};
+
+            if (beginDateStr) {
+                condition.gpstime = {};
+                condition.gpstime["$gte"] = ISODate(beginDateStr);
+            }
+            if (endDateStr) {
+                if (!condition.gpstime)
+                    condition.gpstime = {};
+                condition.gpstime["$lte"] = ISODate(endDateStr);
+            }
+            if (gpsdeviceid) {
+                condition.gpsdeviceid = {};
+                condition.gpsdeviceid["$in"] = gpsdeviceid;
+            }
+            if (alarmType) {
+                condition.alarmType = {};
+                condition.alarmType["$in"] = alarmType;
+            }
+            if (gpsName) {
+                condition.gpsName = {$regex: gpsName, $options: 'i'};
+            }
+            if (carNumber) {
+                condition.carNumber = {$regex: carNumber, $options: 'i'};
+            }
+            if (departmentId) {
+                condition.departmentId = departmentId;
+            }
+            if (departmentName) {
+                condition.departmentName = departmentName;
+            }
+            if (personId) {
+                condition.personId = personId;
+            }
+            if (personName) {
+                condition.personName = personName;
+            }
+            if (effective && effective != -1) {
+                condition.effective = effective;
+            }
+            
+            //return condition;
+            var res = db.trackAlarmMongo.aggregate([
+                {
+                    $match: condition
+                }, {
+                    $group: {
+                        _id: {
+                            gpsdeviceid: "$gpsdeviceid",
+                            gpsName: "$gpsName",
+                            longitude: "$longitude",
+                            latitude: "$latitude",
+                            alarmType: "$alarmType"
+                        }
+                    }
+                }, {
+                    $sort: {"maxGpstime": -1}
+                }
+            ]);
+            return res.toArray.length;
+        }
+    });
+```
+
+**执行存储过程**
+
+```Js
+//调用alarmAnalysis函数
+db.eval("alarmAnalysis('2017-01-08 00:00:00','2017-11-09 01:46:22',['402848945a82c752015a83c483380000','00000000551544e30155202a8eb1024b'],[1,18,19,20],null,null,null,null,null,null,-1)");
+```
+
+***** 在终端临时定义的函数，在退出后将被销毁，如下：
+
+```Shell
+> function test(){
+  ......
+}
+```
+
+### 日志
+
+**开启Profiling和设置**
+
+**1：通过mongo shell：**
+
+```Js
+//查看状态：级别和时间
+db.getProfilingStatus();
+{ "was" : 1, "slowms" : 100 }
+//查看级别
+db.getProfilingLevel();
+1
+//设置级别
+db.setProfilingLevel(2);
+{ "was" : 1, "slowms" : 100, "ok" : 1 }
+//设置级别和时间
+db.setProfilingLevel(1,200)
+{ "was" : 2, "slowms" : 100, "ok" : 1 }
+
+//不记录命令
+db.setProfilingLevel(0);
+//记录慢命令
+db.setProfilingLevel(1);
+//记录所有命令
+db.setProfilingLevel(2);
+```
+
+​	以上要操作要是在test集合下面的话，只对该集合里的操作有效，要是需要对整个实例有效，则需要在所有的集合下设置或则在开启的时候开启参数：
+
+**2：不通过mongo shell：**
+
+```Shell
+mongod --profile=1 --slowms=15
+```
+
+**或则在配置文件里添加2行：**
+
+```Xml
+profile = 1
+slowms = 300
+```
+
+​	Profile 记录在级别1时会记录慢命令，那么这个慢的定义是什么？上面我们说到其默认为100ms，当然有默认就有设置，其设置方法和级别一样有两种，一种是通过添加–slowms启动参数配置。第二种是调用db.setProfilingLevel时加上第二个参数：
+
+```Js
+db.setProfilingLevel( level , slowms )
+db.setProfilingLevel( 1 , 10 );
+```
+
+​	Mongo Profile 记录是直接存在系统db里的，记录位置 system.profile ，所以，我们只要查询这个Collection的记录就可以获取到我们的 Profile 记录了。
+
+**Profile信息内容详解：**
+
+```xml-dtd
+ts-该命令在何时执行.
+millis Time-该命令执行耗时，以毫秒记.
+info-本命令的详细信息.
+query-表明这是一个query查询操作.
+ntoreturn-本次查询客户端要求返回的记录数.比如, findOne()命令执行时 ntoreturn 为 1.有limit(n) 条件时ntoreturn为n.
+query-具体的查询条件（如x>3）.
+nscanned-本次查询扫描的记录数.
+reslen-返回结果集的大小.
+nreturned-本次查询实际返回的结果集.
+update-表明这是一个update更新操作.
+fastmod-Indicates a fast modify operation. See Updates. These operations are normally quite fast.
+fastmodinsert – indicates a fast modify operation that performed an upsert.
+upsert-表明update的upsert参数为true.此参数的功能是如果update的记录不存在，则用update的条件insert一条记录.
+moved-表明本次update是否移动了硬盘上的数据，如果新记录比原记录短，通常不会移动当前记录，如果新记录比原记录长，那么可能会移动记录到其它位置，这时候会导致相关索引的更新.磁盘操作更多，加上索引更新，会使得这样的操作比较慢.
+insert-这是一个insert插入操作.
+getmore-这是一个getmore 操作，getmore通常发生在结果集比较大的查询时，第一个query返回了部分结果，后续的结果是通过getmore来获取的。
+```
+```Js
+db.system.profile.find().pretty()
+{
+    "op": "query",    //操作类型，有insert、query、update、remove、getmore、command
+    "ns": "mc.user",  //操作的集合
+    "query": {        //查询语句
+        "mp_id": 5,
+        "is_fans": 1,
+        "latestTime": {
+            "$ne": 0
+        },
+        "latestMsgId": {
+            "$gt": 0
+        },
+        "$where": "new Date(this.latestNormalTime)>new Date(this.replyTime)"
+    },
+    "cursorid": NumberLong("1475423943124458998"),
+    "ntoreturn": 0,   //返回的记录数。例如，profile命令将返回一个文档（一个结果文件），因此ntoreturn值将为1。limit(5)命令将返回五个文件，因此ntoreturn值是5。如果ntoreturn值为0，则该命令没有指定一些文件返回，因为会是这样一个简单的find()命令没有指定的限制。
+    "ntoskip": 0,     //skip()方法指定的跳跃数
+    "nscanned": 304,  //扫描数量
+    "keyUpdates": 0,  //索引更新的数量，改变一个索引键带有一个小的性能开销，因为数据库必须删除旧的key，并插入一个新的key到B-树索引
+    "numYield": 0,    //该查询为其他查询让出锁的次数
+    "lockStats": {    //锁信息，R：全局读锁；W：全局写锁；r：特定数据库的读锁；w：特定数据库的写锁
+        "timeLockedMicros": {     //锁
+            "r": NumberLong(19467),
+            "w": NumberLong(0)
+        },
+        "timeAcquiringMicros": {  //锁等待
+            "r": NumberLong(7),
+            "w": NumberLong(9)
+        }
+    },
+    "nreturned": 101,        //返回的数量
+    "responseLength": 74659, //响应字节长度
+    "millis": 19,            //消耗的时间（毫秒）
+    "ts": ISODate("2014-02-25T02:13:54.899Z"), //语句执行的时间
+    "client": "127.0.0.1",   //链接ip或则主机
+    "allUsers": [],
+    "user": ""               //用户
+}
+```
+
+**除上面外还有：**
+
+**scanAndOrder：**是一个布尔值，是True当一个查询不能使用的文件的顺序在索引中的排序返回结果：MongoDB中必须将其接收到的文件从一个游标后的文件进行排序。
+如果scanAndOrder是False，MongoDB的可使用这些文件的顺序索引返回排序的结果。即：True：文档进行排序，False：使用索引。
+
+**moved：**更新操作在磁盘上移动一个或多个文件到新的位置。表明本次update是否移动了硬盘上的数据，如果新记录比原记录短，通常不会移动当前记录，如果新记录比原记录长，那么可能会移动记录到其它位置，这时候会导致相关索引的更新.磁盘操作更多，加上索引
+更新，会使得这样的操作比较慢.
+
+**nmoved：**文件在磁盘上操作。
+
+**nupdated：**更新文档的数目。
+
+**getmore：**是一个getmore 操作，getmore通常发生在结果集比较大的查询时，第一个query返回了部分结果，后续的结果是通过getmore来获取的。
+
+	如果nscanned(扫描的记录数)远大于nreturned(返回结果的记录数)的话，要考虑通过加索引来优化记录定位了。responseLength如果过大，说明返回的结果集太大了，这时要看是否只需要必要的字段。
+
+如果只查看query的筛选方法如下：
+
+```Js
+db.system.profile.find({"op":"query"});
+```
+
+**修改“慢查询日志”的大小**
+
+```Js
+//关闭Profiling
+db.setProfilingLevel(0);
+{ "was" : 0, "slowms" : 200, "ok" : 1 }
+//删除system.profile集合
+db.system.profile.drop();
+true
+//创建一个新的system.profile集合
+db.createCollection( "system.profile", { capped: true, size:4000000 } );
+{ "ok" : 1 }
+//重新开启Profiling
+db.setProfilingLevel(1);
+{ "was" : 0, "slowms" : 200, "ok" : 1 }
+```
+
+**注意：**要改变Secondary的system.profile的大小，你必须停止Secondary，运行它作为一个独立的，然后再执行上述步骤。完成后，重新启动加入副本集。
+
+**日常使用的查询**：
+
+```Js
+//返回最近的10条记录
+db.system.profile.find().limit(10).sort({ts: -1}).pretty();
+
+//返回所有的操作，除command类型的
+db.system.profile.find({op: {$ne: 'command'}}).pretty();
+
+//返回特定集合
+db.system.profile.find({ns: 'mydb.test'}).pretty();
+
+//返回大于5毫秒慢的操作
+db.system.profile.find({millis: {$gt: 5}}).pretty();
+
+//从一个特定的时间范围内返回信息
+db.system.profile.find(
+    {
+        ts: {
+            $gt: ISODate("2018-01-12T08:04:00.000Z"),
+            $lt: new ISODate("2018-01-12T08:06:00.000Z")
+        }
+    }
+).pretty();
+
+//特定时间，限制用户，按照消耗时间排序
+db.system.profile.find(
+    {
+        ts: {
+            $gt: new ISODate("2011-07-12T03:00:00Z"),
+            $lt: new ISODate("2011-07-12T03:40:00Z")
+        }
+    },
+    {user: 0}
+).sort({millis: -1});
+```
+
+**总结：**
+
+ 	Profiling 功能肯定是会影响效率的，但是不太严重，原因是他使用的是system.profile 来记录，而system.profile 是一个capped collection 这种collection 在操作上有一些限制和特点，但是效率更高，所以在使用的时候可以打开该功能，不需要一直打开。
+
+### Strict Mode & Shell Mode
+
+**Date**
+
+`data_date`
+
+| Strict Mode            | mongo Shell Mode     |
+| ---------------------- | -------------------- |
+| { "$date": "\<date>" } | new Date ( \<date> ) |
+
+In *Strict mode*, `<date>` is an ISO-8601 date format with a mandatory time zone field following the template `YYYY-MM-DDTHH:mm:ss.mmm<+/-Offset>`.The MongoDB JSON parser currently does not support loading ISO-8601 strings representing dates prior to the [Unix epoch](https://docs.mongodb.com/manual/reference/glossary/#term-unix-epoch). When formatting pre-epoch dates and dates past what your system’s `time_t`type can hold, the following format is used:`{ "$date" : { "$numberLong" : "<dateAsMilliseconds>" } }`
+
+In *Shell mode*, `<date>` is the JSON representation of a 64-bit signed integer giving the number of milliseconds since epoch UTC.
+
+**如下代码在shell中将无法查询出结果：**
+
+```Js
+db.testdate.find({dt:{$gte:{$date:'2000-01-01T00:00:00Z'}}});
+```
+
+**必须使用：**
+
+```Js
+db.testdate.find({dt:{$gte:ISODate('2000-01-01T00:00:00Z')}});
+```
+
+来自stackoverflow的回答：
+
+`$date` is prepared for tools[`mongoexport`](https://docs.mongodb.com/manual/reference/program/mongoexport/#bin.mongoexport), [`mongoimport`](https://docs.mongodb.com/manual/reference/program/mongoimport/), etc. Mongo shell can't recognize it, you should use `Date()` or `ISODate()` instead.
+
+< `mongoexport` and `mongoimport` uses the [strict mode representation](https://docs.mongodb.com/manual/reference/mongodb-extended-json/) for certain types.>
+
+### 数据导入与导出
+
+**导出：** 
+
+```Js
+mongoexport -h 172.20.1.40 --db cz_track_log --collection trackLogMongo --out track.dat --query='{"gpsdeviceid":"000000005b7be1de015b7f02fbd63d2b","gpstime":{"$gt":ISODate("2018-01-16T16:02:49.167Z"),"$lt":ISODate("2018-01-17T09:02:49.167Z")}}'
+```
+
+**导入：**
+
+```js
+mongoimport -h 192.168.12.61 -d cz_track_log -c trackLogMongo --file track.dat --type json
+```
+
+### 建立索引
+
+查询过程中：对数据按照某一列进行排序，若数据过多且没有对该列建立索引，会报如下错误：
+
+```js
+Error: error: {
+	"ok" : 0,
+	"errmsg" : "Executor error during find command: OperationFailed: Sort operation used more than the maximum 33554432 bytes of RAM. Add an index, or specify a smaller limit.",
+	"code" : 96,
+	"codeName" : "OperationFailed"
+}
+```
+
+解决方法是对该列建立索引：
+
+```js
+db.trackAlarmMongo.ensureIndex({createTime:1})
+```
+
